@@ -1,0 +1,420 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+int led = 4;
+int taster = 2;
+int tempPin = 7;
+
+int ruhe;
+int tasterAlt;
+
+float temperatur = 0;
+unsigned long letzteMessung = 0;
+
+WebServer server(80);
+OneWire oneWire(tempPin);
+DallasTemperature sensoren(&oneWire);
+
+String seite = R"(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LED Steuerung</title>
+<style>
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #1e1e2e;
+  font-family: Arial, sans-serif;
+  color: white;
+}
+.karte {
+  background: #2a2a3d;
+  padding: 40px 50px;
+  border-radius: 20px;
+  text-align: center;
+  box-shadow: 0 10px 30px black;
+}
+.lampe {
+  width: 120px;
+  height: 120px;
+  margin: 30px auto;
+  border-radius: 50%;
+  background: #444;
+  transition: 0.3s;
+}
+.lampe.an {
+  background: #ffd43b;
+  box-shadow: 0 0 60px #ffd43b;
+}
+#status {
+  font-size: 24px;
+  font-weight: bold;
+}
+.knoepfe {
+  margin: 30px 0 20px;
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+}
+button {
+  width: 100px;
+  padding: 15px;
+  font-size: 18px;
+  border: none;
+  border-radius: 10px;
+  color: white;
+  cursor: pointer;
+}
+#an { background: #2f9e44; }
+#aus { background: #c92a2a; }
+kbd {
+  background: white;
+  color: black;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-weight: bold;
+}
+.karte + .karte {
+  margin-top: 30px;
+}
+#temperatur {
+  font-size: 48px;
+  font-weight: bold;
+  color: #ff6b6b;
+  margin: 20px 0;
+}
+canvas {
+  width: 100%;
+  background: #1e1e2e;
+  border-radius: 10px;
+}
+.seite {
+  padding: 30px 16px;
+}
+</style>
+</head>
+<body>
+<div class="seite">
+<div class="karte">
+  <h1>LED Steuerung</h1>
+  <div id="lampe" class="lampe"></div>
+  <div id="status">LED aus</div>
+  <div class="knoepfe">
+    <button id="an">An</button>
+    <button id="aus">Aus</button>
+  </div>
+  <p>Tastatur: <kbd>e</kbd> = an &nbsp; <kbd>o</kbd> = aus</p>
+</div>
+<div class="karte">
+  <h1>Temperatur</h1>
+  <div id="temperatur">-- °C</div>
+  <canvas id="diagramm" width="400" height="200"></canvas>
+  <p>Letzte 60 Sekunden</p>
+</div>
+</div>
+<script>
+function anzeigen(zustand) {
+  document.getElementById('status').innerText = 'LED ' + zustand;
+  if (zustand == 'an') {
+    document.getElementById('lampe').className = 'lampe an';
+  } else {
+    document.getElementById('lampe').className = 'lampe';
+  }
+}
+
+function schalten(befehl) {
+  fetch('/' + befehl).then(antwort => antwort.text()).then(anzeigen);
+}
+
+document.getElementById('an').onclick = function() { schalten('an'); };
+document.getElementById('aus').onclick = function() { schalten('aus'); };
+
+document.addEventListener('keydown', function(taste) {
+  if (taste.key == 'e') schalten('an');
+  if (taste.key == 'o') schalten('aus');
+});
+
+setInterval(function() { schalten('status'); }, 500);
+
+let werte = [];
+
+function zeichnen() {
+  let leinwand = document.getElementById('diagramm');
+  let stift = leinwand.getContext('2d');
+  let breite = leinwand.width;
+  let hoehe = leinwand.height;
+  let rand = 50;
+
+  stift.clearRect(0, 0, breite, hoehe);
+  if (werte.length == 0) return;
+
+  let min = Math.floor(Math.min(...werte) - 1);
+  let max = Math.ceil(Math.max(...werte) + 1);
+
+  stift.strokeStyle = '#444';
+  stift.lineWidth = 1;
+  stift.fillStyle = '#aaa';
+  stift.font = '12px Arial';
+  for (let i = 0; i <= 4; i++) {
+    let y = 10 + i * (hoehe - 20) / 4;
+    let wert = max - i * (max - min) / 4;
+    stift.beginPath();
+    stift.moveTo(rand, y);
+    stift.lineTo(breite, y);
+    stift.stroke();
+    stift.fillText(wert.toFixed(1) + ' °C', 0, y + 4);
+  }
+
+  stift.strokeStyle = '#ff6b6b';
+  stift.lineWidth = 3;
+  stift.beginPath();
+  for (let i = 0; i < werte.length; i++) {
+    let x = rand + i * (breite - rand) / 59;
+    let y = 10 + (max - werte[i]) * (hoehe - 20) / (max - min);
+    if (i == 0) {
+      stift.moveTo(x, y);
+    } else {
+      stift.lineTo(x, y);
+    }
+  }
+  stift.stroke();
+}
+
+function temperaturHolen() {
+  fetch('/temperatur').then(antwort => antwort.text()).then(function(text) {
+    let wert = parseFloat(text);
+    if (wert < -100) {
+      document.getElementById('temperatur').innerText = 'Sensor fehlt';
+      return;
+    }
+    document.getElementById('temperatur').innerText = wert.toFixed(1) + ' °C';
+    werte.push(wert);
+    if (werte.length > 60) werte.shift();
+    zeichnen();
+  });
+}
+
+setInterval(temperaturHolen, 1000);
+</script>
+</body>
+</html>
+)";
+
+void startseite() {
+  server.send(200, "text/html", seite);
+}
+
+void zustandSenden() {
+  if (digitalRead(led) == HIGH) {
+    server.send(200, "text/plain", "an");
+  } else {
+    server.send(200, "text/plain", "aus");
+  }
+}
+
+void ledAn() {
+  digitalWrite(led, HIGH);
+  Serial.println("Web: LED an");
+  zustandSenden();
+}
+
+void ledAus() {
+  digitalWrite(led, LOW);
+  Serial.println("Web: LED aus");
+  zustandSenden();
+}
+
+void temperaturSenden() {
+  server.send(200, "text/plain", String(temperatur, 1));
+}
+
+void setup() {
+  pinMode(led, OUTPUT);
+  pinMode(taster, INPUT_PULLUP);
+  Serial.begin(115200);
+  delay(1000);
+
+  ruhe = digitalRead(taster);
+  tasterAlt = ruhe;
+
+  sensoren.begin();
+  sensoren.setWaitForConversion(false);
+  sensoren.requestTemperatures();
+
+  WiFi.softAP("ESP32-LED", "12345678");
+  Serial.print("Webseite: http://");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", startseite);
+  server.on("/an", ledAn);
+  server.on("/aus", ledAus);
+  server.on("/status", zustandSenden);
+  server.on("/temperatur", temperaturSenden);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+
+  if (millis() - letzteMessung >= 1000) {
+    letzteMessung = millis();
+    temperatur = sensoren.getTempCByIndex(0);
+    sensoren.requestTemperatures();
+  }
+
+  int tasterWert = digitalRead(taster);
+  if (tasterWert != tasterAlt) {
+    delay(20);
+    tasterAlt = tasterWert;
+    if (tasterWert != ruhe) {
+      digitalWrite(led, HIGH);
+      Serial.println("Taster: LED an");
+    } else {
+      digitalWrite(led, LOW);
+      Serial.println("Taster: LED aus");
+    }
+  }
+}
+
+
+/*
+#include <Arduino.h>
+
+int led = 4;
+int poti = 2;
+int taster = 42;
+
+int ruhe;
+int tasterAlt;
+int potiAlt = -100;
+
+void setup() {
+  pinMode(led, OUTPUT);
+  pinMode(taster, INPUT_PULLUP);
+  Serial.begin(115200);
+  Serial.setTimeout(2000);
+  delay(1000);
+  ruhe = digitalRead(taster);
+  tasterAlt = ruhe;
+  Serial.println("LED steuern: an / aus eingeben");
+}
+
+void loop() {
+  if (Serial.available()) {
+    String eingabe = Serial.readStringUntil('\n');
+    eingabe.trim();
+    eingabe.toLowerCase();
+    if (eingabe == "an" || eingabe == "1") {
+      digitalWrite(led, HIGH);
+      Serial.println("LED an");
+    } else if (eingabe == "aus" || eingabe == "0") {
+      digitalWrite(led, LOW);
+      Serial.println("LED aus");
+    } else if (eingabe.length() > 0) {
+      Serial.println("Unbekannt, an oder aus eingeben");
+    }
+  }
+
+  int potiWert = analogRead(poti);
+  if (abs(potiWert - potiAlt) > 30) {
+    potiAlt = potiWert;
+    Serial.printf("Poti: %d\n", potiWert);
+  }
+
+  int tasterWert = digitalRead(taster);
+  if (tasterWert != tasterAlt) {
+    delay(20);
+    tasterAlt = tasterWert;
+    Serial.printf("Taster: %s (%d)\n", tasterWert != ruhe ? "gedrueckt" : "losgelassen", tasterWert);
+  }
+}
+*/
+
+
+/*
+#include <Arduino.h>
+
+const int POTI = 2;
+const int LICHT = 4;
+const int LICHT2 = 20;
+const int TASTER = 42;
+
+int ruhe;
+int tasterAlt;
+int druecke = 0;
+bool licht2 = false;
+int potiAlt = -100;
+int potiMin = 4095;
+int potiMax = 0;
+
+void blinken(int pin, int mal) {
+  for (int i = 0; i < mal; i++) {
+    digitalWrite(pin, HIGH);
+    delay(400);
+    digitalWrite(pin, LOW);
+    delay(400);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+  pinMode(LICHT, OUTPUT);
+  pinMode(LICHT2, OUTPUT);
+  pinMode(TASTER, INPUT_PULLUP);
+
+  Serial.println();
+  Serial.println("===== Hardwaretest =====");
+  Serial.println("Licht GPIO 4 blinkt 3x");
+  blinken(LICHT, 3);
+  Serial.println("Licht GPIO 20 blinkt 3x");
+  blinken(LICHT2, 3);
+
+  ruhe = digitalRead(TASTER);
+  tasterAlt = ruhe;
+  Serial.printf("Taster GPIO 42 Ruhezustand: %s\n", ruhe == HIGH ? "HIGH" : "LOW");
+  Serial.println("Poti drehen   -> Licht 4 wird heller/dunkler");
+  Serial.println("Taster druecken -> Licht 20 geht an/aus");
+  Serial.println("========================");
+}
+
+void loop() {
+  int poti = analogRead(POTI);
+  analogWrite(LICHT, poti / 16);
+  if (poti < potiMin) potiMin = poti;
+  if (poti > potiMax) potiMax = poti;
+  if (abs(poti - potiAlt) > 40) {
+    potiAlt = poti;
+    Serial.printf("Poti %4d (%3d%%)  min %4d  max %4d\n", poti, poti * 100 / 4095, potiMin, potiMax);
+  }
+
+  int taster = digitalRead(TASTER);
+  if (taster != tasterAlt) {
+    delay(20);
+    taster = digitalRead(TASTER);
+    if (taster != tasterAlt) {
+      tasterAlt = taster;
+      if (taster != ruhe) {
+        druecke++;
+        licht2 = !licht2;
+        digitalWrite(LICHT2, licht2);
+        Serial.printf("Taster gedrueckt (%dx), Licht 20 %s\n", druecke, licht2 ? "an" : "aus");
+      } else {
+        Serial.println("Taster losgelassen");
+      }
+    }
+  }
+
+  delay(10);
+}
+
+*/
